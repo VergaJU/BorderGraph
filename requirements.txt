@@ -1,0 +1,10 @@
+numpy
+scanpy
+squidpy
+anndata
+joblib
+scipy
+itertools
+pandas
+scikit-learn
+scikit-image
