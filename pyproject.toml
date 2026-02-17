@@ -1,25 +1,22 @@
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "BorderGraph"
 version = "0.1.0"
-description = "Package to compute contours and neighbrhood graph considering the borders of the cells instead of the centroids. It allows more precise computation of the neighborhood graph."
+description = "Package to compute contours and neighborhood graph considering the borders of the cells instead of the centroids. It allows more precise computation of the neighborhood graph."
 readme = "README.md"
 authors = [{name = "Jacopo Umberto Verga"}]
 requires-python = ">=3.8"
-
 dependencies = [
-    "numpy",
-    "scanpy",
-    "squidpy",
-    "anndata",
-    "joblib",
-    "scipy",
-    "pandas",
-    "scikit-learn",
-    "scikit-image"
+    "numpy>=1.21.0",
+    "scanpy>=1.9.0",
+    "anndata>=0.8.0",
+    "joblib>=1.2.0",
+    "scipy>=1.8.0",
+    "pandas>=1.5.0",
+    "scikit-image>=0.19.0"
 ]
 
 [project.urls]
