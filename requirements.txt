@@ -1,1 +1,9 @@
--e .
+numpy
+scanpy
+squidpy
+anndata
+joblib
+scipy
+pandas
+scikit-learn
+scikit-image
