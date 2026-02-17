@@ -5,6 +5,7 @@ from joblib import Parallel, delayed
 from scipy.spatial import distance
 from scipy.sparse import csr_matrix
 from skimage import measure
+from scipy.spatial import cKDTree
 from itertools import combinations
 import pickle
 from typing import Dict, List, Tuple, Union
@@ -98,7 +99,7 @@ class Utils():
 
 class Contours():
     @staticmethod
-    def find_contours(image: np.ndarray, cell_id: str, label: int, cutoff: float = 0.9, **kwargs) -> Dict[str, np.ndarray]:
+    def find_contours(image: np.ndarray, cell_id: str, label: int, offset: Tuple[int, int] = (0, 0), cutoff: float = 0.9, **kwargs) -> Dict[str, np.ndarray]:
         """
         Find contours for a specific label in the image.
 
@@ -106,6 +107,7 @@ class Contours():
             image (np.ndarray): The image data.
             cell_id (str): The cell ID.
             label (int): The label to find contours for.
+            offset (Tuple[int, int]): The offset to add to the contour coordinates. Defaults to (0, 0).
             cutoff (float, optional): The cutoff value. Defaults to 0.9.
 
         Returns:
@@ -113,8 +115,12 @@ class Contours():
         """
         contour = measure.find_contours(image == label, cutoff)
         if len(contour) == 0:
-            contour=np.array((0,0))
-        return {cell_id: np.vstack(contour)}
+            contour=np.array([[0,0]])
+        else:
+            contour = np.vstack(contour)
+            contour[:, 0] += offset[0]
+            contour[:, 1] += offset[1]
+        return {cell_id: contour}
 
     @classmethod
     def parallel_find_contours(cls, image: np.ndarray, labels: Dict[str, int], cutoff: float = 0.9, n_jobs: int = -1, **kwargs) -> List[Dict[str, np.ndarray]]:
@@ -130,7 +136,31 @@ class Contours():
         Returns:
             List[Dict[str, np.ndarray]]: A list of dictionaries containing the cell IDs as keys and the contours as values.
         """
-        results = Parallel(n_jobs=n_jobs)(delayed(cls.find_contours)(image, cell_id, label, cutoff) for cell_id, label in labels.items())
+        regions = measure.regionprops(image)
+        label_to_region = {region.label: region for region in regions}
+        
+        tasks = []
+        for cell_id, label in labels.items():
+            try:
+                label_int = int(label)
+            except ValueError:
+                continue # Skip if label cannot be converted to int
+                
+            if label_int in label_to_region:
+                region = label_to_region[label_int]
+                min_row, min_col, max_row, max_col = region.bbox
+                # Add padding
+                pad = 1
+                min_row = max(0, min_row - pad)
+                min_col = max(0, min_col - pad)
+                max_row = min(image.shape[0], max_row + pad)
+                max_col = min(image.shape[1], max_col + pad)
+                
+                cropped_image = image[min_row:max_row, min_col:max_col]
+                offset = (min_row, min_col)
+                tasks.append((cropped_image, cell_id, label_int, offset))
+                
+        results = Parallel(n_jobs=n_jobs)(delayed(cls.find_contours)(img, cid, lbl, off, cutoff) for img, cid, lbl, off in tasks)
         return results
 
     @classmethod
@@ -180,18 +210,60 @@ class Contours():
 
 class Distances():
     @staticmethod
-    def get_pairs(contours: Dict[str, np.ndarray], **kwargs) -> List[Tuple[str, str]]:
+    def get_pairs(contours: Dict[str, np.ndarray], cutoff: float, **kwargs) -> List[Tuple[str, str]]:
         """
-        Get all possible pairs of labels from the contours.
+        Get pairs of labels from the contours that are potential candidates for being within cutoff distance.
+        Uses a KDTree to filter pairs based on centroids and radii.
 
         Parameters:
             contours (Dict[str, np.ndarray]): A dictionary containing the labels as keys and the contours as values.
+            cutoff (float): The cutoff distance.
 
         Returns:
             List[Tuple[str, str]]: A list of tuples representing the pairs of labels.
         """
-        labels = list(contours.keys())
-        pairs = list(combinations(labels, 2))
+        ids = list(contours.keys())
+        centroids = []
+        radii = []
+        valid_indices = []
+        
+        for idx, i in enumerate(ids):
+            c = contours[i]
+            if len(c) <= 1: # Skip empty or single point placeholders if they are invalid
+                continue
+                
+            centroid = np.mean(c, axis=0)
+            # Max distance from centroid
+            dists = np.linalg.norm(c - centroid, axis=1)
+            radius = np.max(dists)
+            
+            centroids.append(centroid)
+            radii.append(radius)
+            valid_indices.append(idx)
+            
+        centroids = np.array(centroids)
+        radii = np.array(radii)
+        
+        if len(centroids) == 0:
+            return []
+            
+        tree = cKDTree(centroids)
+        
+        # Use a safe upper bound for the query radius: 2 * max_radius + cutoff
+        max_r = np.max(radii)
+        search_radius = 2 * max_r + cutoff
+        
+        candidate_indices = tree.query_pairs(search_radius)
+        
+        pairs = []
+        for i, j in candidate_indices:
+            dist = np.linalg.norm(centroids[i] - centroids[j])
+            if dist < radii[i] + radii[j] + cutoff:
+                # Map back to original IDs
+                id_i = ids[valid_indices[i]]
+                id_j = ids[valid_indices[j]]
+                pairs.append((id_i, id_j))
+                
         return pairs
         
     @staticmethod
@@ -258,10 +330,15 @@ class Distances():
             List[List[Union[str, float]]]: A list containing the pairs of labels and their minimum distances.
         """
         contours = adata.uns[contours_key][library_id]
-        pairs = cls.get_pairs(contours)
+        pairs = cls.get_pairs(contours, cutoff)
+
+        if not pairs:
+            return []
 
         # Split pairs into chunks for parallel processing
-        num_chunks = n_jobs if n_jobs > 0 else os.cpu_count()
+        num_chunks = n_jobs if n_jobs > 0 else (os.cpu_count() or 1)
+        # Handle case where pairs might be fewer than num_chunks
+        num_chunks = min(num_chunks, len(pairs))
         chunk_size = int(np.ceil(len(pairs) / num_chunks))
         chunks = [pairs[i:i + chunk_size] for i in range(0, len(pairs), chunk_size)]
 
@@ -280,7 +357,7 @@ class Distances():
                            cutoff: float = 30,
                            contours_key: str = 'contours',
                            n_jobs: int = -1,
-                           **kwargs) -> List[List[Union[str, float]]]:
+                           **kwargs) -> List[List[Union[int, float]]]:
         """
         Compute the pairs of labels and their minimum distances for all images in the AnnData object.
 
@@ -291,7 +368,7 @@ class Distances():
             n_jobs (int, optional): The number of parallel jobs. Defaults to -1.
 
         Returns:
-            List[List[Union[str, float]]]: A list containing the pairs of labels and their minimum distances.
+            List[List[Union[int, float]]]: A list containing the pairs of labels and their minimum distances.
         """
         libraries = list(adata.uns[contours_key].keys())
         results = []
