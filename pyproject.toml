@@ -22,3 +22,6 @@ dependencies = [
 [project.urls]
 "Homepage" = "https://github.com/VergaJU/BorderGraph"
 "Repository" = "https://github.com/VergaJU/BorderGraph"
+
+[tool.setuptools.packages.find]
+where = ["."]
