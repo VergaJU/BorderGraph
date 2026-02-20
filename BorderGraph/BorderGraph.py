@@ -256,7 +256,7 @@ class Distances():
         
         candidate_indices = tree.query_pairs(search_radius)
         pairs_array = np.array(list(candidate_indices))
-        valid_ids_array = np.array(valid_indices)
+        valid_ids_array = np.array(ids)
 
         pairs_ids = np.column_stack([
             valid_ids_array[pairs_array[:, 0]],
