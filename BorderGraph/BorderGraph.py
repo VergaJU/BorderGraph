@@ -113,7 +113,8 @@ class Contours():
         Returns:
             Dict[str, np.ndarray]: A dictionary containing the cell ID as key and the contours as value.
         """
-        contour = measure.find_contours(image == label, cutoff)
+        contour = measure.find_contours(image == label, cutoff, fully_connected="high")
+        contour = max(contour, key=len) 
         if len(contour) == 0:
             contour=np.array([[0,0]])
         else:
@@ -160,7 +161,7 @@ class Contours():
                 offset = (min_row, min_col)
                 tasks.append((cropped_image, cell_id, label_int, offset))
                 
-        results = Parallel(n_jobs=n_jobs)(delayed(cls.find_contours)(img, cid, lbl, off, cutoff) for img, cid, lbl, off in tasks)
+        results = Parallel(n_jobs=n_jobs, backend="threading")(delayed(cls.find_contours)(image = img, cell_id=cid, label=lbl, offset=off, cutoff=cutoff) for img, cid, lbl, off in tasks)
         return results
 
     @classmethod
@@ -254,17 +255,16 @@ class Distances():
         search_radius = 2 * max_r + cutoff
         
         candidate_indices = tree.query_pairs(search_radius)
-        
-        pairs = []
-        for i, j in candidate_indices:
-            dist = np.linalg.norm(centroids[i] - centroids[j])
-            if dist < radii[i] + radii[j] + cutoff:
-                # Map back to original IDs
-                id_i = ids[valid_indices[i]]
-                id_j = ids[valid_indices[j]]
-                pairs.append((id_i, id_j))
+        pairs_array = np.array(list(candidate_indices))
+        valid_ids_array = np.array(valid_indices)
+
+        pairs_ids = np.column_stack([
+            valid_ids_array[pairs_array[:, 0]],
+            valid_ids_array[pairs_array[:, 1]]
+        ])
+
                 
-        return pairs
+        return pairs_ids
         
     @staticmethod
     def compute_min_distance(pair: Tuple[str, str],
@@ -288,11 +288,37 @@ class Distances():
             return None
         return [pair[0], pair[1], min_dist]
 
+    @staticmethod
+    def compute_min_distance_kd(pair: Tuple[str, str],
+                             contours: Dict[str, np.ndarray],
+                             cutoff: float, **kwargs) -> Optional[List[Union[str, float]]]:
+        """
+        Compute the minimum distance between two pairs of contours.
+
+        Parameters:
+            pair (Tuple[str, str]): The pair of labels.
+            contours (Dict[str, np.ndarray]): A dictionary containing the labels as keys and the contours as values.
+            cutoff (float): The cutoff value.
+
+        Returns:
+            Optional[List[Union[str, float]]]: A list containing the pair of labels and the minimum distance,
+                or None if the minimum distance is greater than the cutoff.
+        """
+        tree = cKDTree(contours[pair[1]])
+        dists,_ = tree.query(contours[pair[0]])
+        min_dist = np.min(dists)
+        if min_dist > cutoff:
+            return None
+        return [pair[0], pair[1], min_dist]
+    
+
     @classmethod
     def process_chunk(cls,
                       chunk: List[Tuple[str, str]],
                       contours: Dict[str, np.ndarray],
-                      cutoff: float, **kwargs) -> List[Optional[List[Union[str, float]]]]:
+                      cutoff: float, 
+                      kd: bool = False,
+                      **kwargs) -> List[Optional[List[Union[str, float]]]]:
         """
         Process a chunk of pairs of contours and compute the minimum distance.
 
@@ -306,7 +332,11 @@ class Distances():
             List[Optional[List[Union[str, float]]]]: A list containing the pair of labels and the minimum distance,
                 or None if the minimum distance is greater than the cutoff.
         """
-        return [cls.compute_min_distance(pair, contours, cutoff) for pair in chunk]
+        if kd:
+            return [cls.compute_min_distance_kd(pair, contours, cutoff) for pair in chunk]
+
+        else:
+            return [cls.compute_min_distance(pair, contours, cutoff) for pair in chunk]
                 
     @classmethod
     def compute_image_pairs(cls,
@@ -315,6 +345,7 @@ class Distances():
                             cutoff: float,
                             contours_key: str = 'contours',
                             n_jobs: int = -1,
+                            kd:bool = False,
                             **kwargs) -> List[List[Union[str, float]]]:
         """
         Compute the pairs of labels and their minimum distances for a specific library ID.
@@ -330,7 +361,7 @@ class Distances():
             List[List[Union[str, float]]]: A list containing the pairs of labels and their minimum distances.
         """
         contours = adata.uns[contours_key][library_id]
-        pairs = cls.get_pairs(contours, cutoff)
+        pairs = list(cls.get_pairs(contours, cutoff))
 
         if not pairs:
             return []
@@ -343,10 +374,11 @@ class Distances():
         chunks = [pairs[i:i + chunk_size] for i in range(0, len(pairs), chunk_size)]
 
         # Parallel processing of chunks
-        results = Parallel(n_jobs=n_jobs)(delayed(cls.process_chunk)(chunk, contours, cutoff) for chunk in chunks)
-
+        results = Parallel(n_jobs=n_jobs, backend="threading", prefer="threads")(delayed(cls.process_chunk)(chunk, contours, cutoff, kd) for chunk in chunks)
+        from itertools import chain
+        results = list(filter(None, chain.from_iterable(results)))
         # Flatten the list of results
-        results = [item for sublist in results for item in sublist if item is not None]
+        # results = [item for sublist in results for item in sublist if item is not None]
 
         return results
 
